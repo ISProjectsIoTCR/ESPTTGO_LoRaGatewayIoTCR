@@ -5,20 +5,34 @@
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include "user-variables.h"
-
+#include <SPI.h>
+#include <LoRa.h>       // https://github.com/sandeepmistry/arduino-LoRa
+#include <U8g2lib.h>   // https://github.com/olikraus/U8g2_Arduino
 
 
 //CONFIGURACION DE SENSORES Y ACTUADORES
 struct Config                               //PINS-INPUTS (json construct setup)
 {
-  float temp;
-  float hum;
+  float sensor1;
+  float sensor2;
   int ledstate;
 };
 Config config;
 
 //PINS-OUTPUTS
-#define led 2
+#define OFF 0   // For LED
+#define ON 1
+// SPI LoRa Radio
+#define LORA_SCK 5        // GPIO5 - SX1276 SCK
+#define LORA_MISO 19     // GPIO19 - SX1276 MISO
+#define LORA_MOSI 27    // GPIO27 - SX1276 MOSI
+#define LORA_CS 18     // GPIO18 - SX1276 CS
+#define LORA_RST 14   // GPIO14 - SX1276 RST
+#define LORA_IRQ 26  // GPIO26 - SX1276 IRQ (interrupt request)
+// I2C OLED Display works with SSD1306 driver
+#define OLED_SDA 4
+#define OLED_SCL 15
+#define OLED_RST 16
 
 //Functions definitions
 void sendToDashboard(const Config & config);
@@ -33,6 +47,8 @@ void callback(char *topic, byte *payload, unsigned int length);
 void process_incoming_msg(String topic, String incoming);
 void print_stats();
 void clear();
+void listeningLora();
+void sendOkLoRa();
 
 
 //Global Vars
@@ -40,6 +56,7 @@ WiFiClient espclient;
 PubSubClient client(espclient);
 Splitter splitter;
 DynamicJsonDocument mqtt_data_doc(2048);
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C Display(U8G2_R0, /* clock=*/ OLED_SCL, /* data=*/ OLED_SDA, /* reset=*/ OLED_RST); // Full framebuffer, SW I2C
 
 long lastReconnectAttemp = 0;
 long varsLastSend[20];
@@ -47,6 +64,10 @@ String last_received_msg = "";
 String last_received_topic = "";
 long lastStats = 0;
 long lastsendToDB = 0;
+String rssi = "";
+String packet = "";
+const int blueLED = LED_BUILTIN;
+bool dataLoRa = false; 
 
 // Start Subroutines
 #include <iotcrv2-conector.h>
@@ -56,9 +77,30 @@ long lastsendToDB = 0;
 void setup()
 {
   Serial.begin(115200);
-  pinMode(led, OUTPUT);
-  clear();
+  while (!Serial);
+  pinMode(blueLED, OUTPUT); // For LED feedback
 
+  Serial.println("LoRa Receiver");
+  Display.begin();
+  Display.enableUTF8Print();    // enable UTF8 support for the Arduino print() function
+  Display.setFont(u8g2_font_ncenB10_tr);
+
+  
+  // Very important for SPI pin configuration!
+  SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS); 
+  // Very important for LoRa Radio pin configuration! 
+  LoRa.setPins(LORA_CS, LORA_RST, LORA_IRQ);    
+
+  if (!LoRa.begin(915E6)) {
+    Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+  // The larger the spreading factor the greater the range but slower data rate
+  // Send and receive radios need to be set the same
+  LoRa.setSpreadingFactor(12);  // ranges from 6-12, default 7 see API docs
+  LoRa.setTxPower(14, PA_OUTPUT_RFO_PIN);
+
+  clear();
   Serial.print("\n\n\nWiFi Connection in Progress" );
   WiFi.begin(wifi_ssid, wifi_password);
 
@@ -94,54 +136,94 @@ void setup()
 //__________________________________LOOP________________________________________
 void loop()
 {
-  check_mqtt_connection();
-  client.loop();
-  process_sensors();
-  sendToDashboard(config);
-  print_stats();
+  listeningLora();
+  if(dataLoRa){
+    check_mqtt_connection();
+    client.loop();
+    sendToDashboard(config);
+    print_stats();
+    sendOkLoRa();
+  }
+}
+
+//________________________________LISTENING_LORA ⤵________________________________
+void listeningLora()
+{
+ // try to parse packet
+  int packetSize = LoRa.parsePacket();
+  Serial.println("Escuchando mensajes LoRa");
+  Display.clearBuffer();
+  Display.setCursor(0,12); Display.print("Escuchando");
+  Display.setCursor(0,30); Display.print("la LoRa...");
+  Display.sendBuffer();
+  if (packetSize) 
+  {
+    dataLoRa = true;
+    Serial.print("Llego un mensaje...'");
+    digitalWrite(blueLED, ON);                                 // Turn blue LED on
+    packet = "";                                               // Clear packet
+
+    while (LoRa.available()) 
+    {
+      packet += (char)LoRa.read();                             // Assemble new packet
+    }
+    rssi = LoRa.packetRssi();
+
+    // Display Info
+    Display.clearBuffer();  
+    Display.setCursor(0,12); Display.print("La LoRa habla");
+    Display.setCursor(0,26); Display.print("Paquete recibido:");
+    Display.setCursor(0,42); Display.print("    '" + packet + "'");
+    Display.setCursor(0,58); Display.print("RSSI " + rssi);
+    Display.sendBuffer();
+
+    digitalWrite(blueLED, OFF); // Turn blue LED off
+    Serial.println(packet + "' con RSSI " + rssi);     
+
+    config.sensor1 = packet.toFloat();
+  }
 }
 
 
-//________________________________SENSORES ⤵____________________________________
-void process_sensors()
-{
-  //get temperature simulation
-  config.temp = random(1, 100);
-  //get humidity simulation
-  config.hum = random(1, 50);
+//________________________________CONFIRMAR ENVIO A NODO_LORA⤵________________________________
+void sendOkLoRa()
+{  
+  dataLoRa = false;
+  bool response = true;
+  Serial.print("enviando confirmación... ");
 
-  //get led status
-  mqtt_data_doc["variables"][6]["last"]["value"] = (HIGH == digitalRead(led));
+  digitalWrite(blueLED, ON);  // Turn blue LED on
+  // send packet
+  LoRa.beginPacket();
+  LoRa.print(response);
+  LoRa.endPacket();
+  digitalWrite(blueLED, OFF); // Turn blue LED off
 
+  // Display Info
+  Display.clearBuffer();
+  Display.setCursor(0,12); Display.print("Confirmando");
+  Display.setCursor(0,30); Display.print("el recibido:");
+  Display.setCursor(0,48); Display.print(" # " + (String)response);
+  Display.sendBuffer();
+  delay(5000);
 }
 
 
 //________________________PUBLICAR EN IoTPROJECTS ⤵_____________________________
 void sendToDashboard(const Config & config)
 {
-  if (!(millis() - lastsendToDB > sendDBInterval))
-  {
+
 //*********************CADA POSICIÓN ES UN WIDGET QUE CREASTE*******************
 
-
-    mqtt_data_doc["variables"][0]["last"]["value"] = config.temp;
+    mqtt_data_doc["variables"][0]["last"]["value"] = config.sensor1;
                                                        //posición 1 del template
-    mqtt_data_doc["variables"][1]["last"]["value"] = config.hum;
+    mqtt_data_doc["variables"][1]["last"]["value"] = config.sensor1;
                                                        //posición 2 del template
-    mqtt_data_doc["variables"][2]["last"]["value"] = config.temp;
+    mqtt_data_doc["variables"][2]["last"]["value"] = config.sensor1;
                                                        //posición 3 del template
-    mqtt_data_doc["variables"][3]["last"]["value"] = config.hum;
 
-
-//******************************************************************************
     send_data_to_broker();
-  }
-  else
-  {
-    Serial.println("ENVIANDO A BASE DE DATOS");
-   send_data_to_DB();
-   lastsendToDB = millis();
-  }
+//******************************************************************************
 }
 
 
@@ -151,14 +233,14 @@ void process_actuators()
   if (mqtt_data_doc["variables"][4]["last"]["value"] == "true")
                                                        //posición 4 del template
   {
-    digitalWrite(led, HIGH);
+    digitalWrite(blueLED, HIGH);
     mqtt_data_doc["variables"][4]["last"]["value"] = "";
     varsLastSend[6] = 0;                               //posición 6 del template
   }
   else if (mqtt_data_doc["variables"][5]["last"]["value"] == "false")
                                                        //posición 4 del template
   {
-    digitalWrite(led, LOW);
+    digitalWrite(blueLED, LOW);
     mqtt_data_doc["variables"][5]["last"]["value"] = "";
     varsLastSend[6] = 0;                               //posición 6 del template
   }
@@ -192,6 +274,6 @@ void print_stats()
 
       Serial.println(String(i) + " \t " + variableFullName.substring(0,5) + " \t\t " + variable.substring(0,10) + " \t " + variableType.substring(0,5) + " \t\t " + String(counter).substring(0,10) + " \t\t " + lastMsg);
     }
-    Serial.print( "\n\n Last Incomming Msg -> " + last_received_msg);
+    Serial.println( "\n\n Last Incomming Msg -> " + last_received_msg);
   }
 }

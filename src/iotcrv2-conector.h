@@ -74,51 +74,38 @@ void check_mqtt_connection()
 void send_data_to_broker()
 {
 
-  long now = millis();
-
   for (int i = 0; i < mqtt_data_doc["variables"].size(); i++)
   {
-
     if (mqtt_data_doc["variables"][i]["variableType"] == "output")
     {
       continue;
     }
-
-    int freq = mqtt_data_doc["variables"][i]["variableSendFreq"];
-
-    if (now - varsLastSend[i] > freq * 1000)
-    {
       varsLastSend[i] = millis();
-      mqtt_data_doc["variables"][i]["last"]["save"] = 0;
+      mqtt_data_doc["variables"][i]["last"]["save"] = 1;
 
       String str_root_topic = mqtt_data_doc["topic"];
       String str_variable = mqtt_data_doc["variables"][i]["variable"];
       String topic = str_root_topic + str_variable + "/sdata";
-
       String toSend = "";
 
       serializeJson(mqtt_data_doc["variables"][i]["last"], toSend);
-
       client.publish(topic.c_str(), toSend.c_str());
-
 
       //STATS
       long counter = mqtt_data_doc["variables"][i]["counter"];
       counter++;
       mqtt_data_doc["variables"][i]["counter"] = counter;
-
-    }
   }
 }
 
-//______________________________________________________________________________
-void send_data_to_DB()
+
+//_________________________________ NO ES USADO POR AHORA_____________________________________________
+void send_data_to_DB()  
 {
   long now = millis();
 
   for (int i = 0; i < mqtt_data_doc["variables"].size(); i++)
   {
-
     if (mqtt_data_doc["variables"][i]["variableType"] == "output")
     {
       continue;
@@ -136,7 +123,7 @@ void send_data_to_DB()
     client.publish(topic.c_str(), toSend.c_str());
     Serial.print(" Mqtt ENVIADO:) " );
 
-      //STATS
+    //STATS
     long counter = mqtt_data_doc["variables"][i]["counter"];
     counter++;
     mqtt_data_doc["variables"][i]["counter"] = counter;
