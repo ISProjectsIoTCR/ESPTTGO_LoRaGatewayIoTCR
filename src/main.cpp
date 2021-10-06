@@ -142,6 +142,7 @@ void loop()
     client.loop();
     sendToDashboard(config);
     print_stats();
+    delay(5000);
     sendOkLoRa();
   }
 }
@@ -150,12 +151,13 @@ void loop()
 void listeningLora()
 {
  // try to parse packet
-  int packetSize = LoRa.parsePacket();
   Serial.println("Escuchando mensajes LoRa");
   Display.clearBuffer();
   Display.setCursor(0,12); Display.print("Escuchando");
   Display.setCursor(0,30); Display.print("la LoRa...");
   Display.sendBuffer();
+
+  int packetSize = LoRa.parsePacket();
   if (packetSize) 
   {
     dataLoRa = true;
